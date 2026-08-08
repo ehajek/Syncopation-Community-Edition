@@ -1,0 +1,115 @@
+# Syncopation — Community Edition
+
+A native macOS app that copies music, books, or any files onto an SD card, a
+folder, or an **iPod** — no iTunes required.
+
+Free and open source under the GPL v3. Built in Swift and SwiftUI with no
+dependencies, no runtime, and no Xcode project: a handful of source files
+compiled by the Swift compiler that ships with Apple's command line tools.
+
+![Syncopation CE in iPod mode with an iPod classic connected](docs/screenshot.png)
+
+## What it does
+
+- **Four modes** — Music, ePUB/PDF, All Files, and iPod.
+- **iPod support** — recognises the iPod you plug in (model, capacity, and its
+  colour), converts FLAC to Apple Lossless so the device can play it, and adds
+  the tracks to the iPod's own library. They play as soon as you eject.
+- **Syncing only ever adds.** Files already there are skipped; nothing is
+  deleted, in any mode.
+- **Erase** — the one way to clear a card or wipe an iPod's music, as a
+  deliberate button with a confirmation. Nothing is copied afterwards.
+- **Preview** — a dry run listing exactly what would be copied.
+- **Safe when things go wrong** — if an iPod is unplugged mid-transfer, the
+  sync stops cleanly, and files it had already copied are tidied up on the
+  next run rather than left stranded on the device.
+- Skips macOS junk files, checks free space before starting, and remembers
+  your folders between launches.
+
+## What it's for
+
+The model is simple on purpose: **add music, and press Erase if you want to
+start over.** There's no library management to learn, and no way to lose music
+by accident.
+
+Album artwork on the iPod, transfers that resume where they left off,
+reclaiming space from files other software left behind, and making an iPod
+match a folder exactly all live in
+[Syncopation Pro](https://github.com/ehajek/Syncopation-Pro).
+
+## Requirements
+
+- macOS 13 (Ventura) or later — Intel or Apple Silicon (universal binary)
+- For iPod mode: an iPod in disk mode — classic, nano (through 4th gen),
+  video, mini, or photo. (iPod touch and iPhone sync differently and aren't
+  supported; nor is the shuffle.)
+
+## Building it (about a minute, once)
+
+**1. Get the Swift compiler.** Open **Terminal** (press `⌘ Space`, type
+"Terminal") and run:
+
+```sh
+xcode-select --install
+```
+
+Click **Install** in the dialog. If it says the tools are already installed,
+you're set.
+
+**2. Download this project.** Click the green **Code** button above and choose
+**Download ZIP** (then double-click to unpack), or in Terminal:
+
+```sh
+git clone https://github.com/ehajek/Syncopation-Community-Edition.git
+```
+
+**3. Build it:**
+
+```sh
+cd ~/Downloads/Syncopation-Community-Edition
+chmod +x build.sh
+./build.sh
+```
+
+**4. Run it.** Double-click `Syncopation CE.app`, or drag it to your
+Applications folder first. Because you built it on your own Mac, macOS trusts
+it — no security warnings.
+
+## Using it
+
+1. Pick the **mode** for what you're copying.
+2. Choose a **source folder**.
+3. Choose the **destination** — a disk or folder, or your iPod.
+4. Click **Preview** to see what would happen, then **Sync**.
+5. Click **Eject** before unplugging.
+
+## How the iPod support works
+
+Stock iPods only play what's listed in their own binary library file, so
+copying files onto one isn't enough. Syncopation writes that library directly —
+including the checksum that iPod classics and later nanos require — which is
+what lets tracks appear and play without iTunes.
+
+## Files
+
+| File | Purpose |
+|------|---------|
+| `Syncopation.swift` | The app: interface, syncing, erasing |
+| `IPodSync.swift` | Writing to an iPod, and recovering from interruptions |
+| `IPodDB.swift` | Reading and writing the iPod's library format |
+| `AudioConvert.swift` | FLAC → Apple Lossless, in-process |
+| `AudioMetadata.swift` | Reading tags and audio properties |
+| `IPodModels.swift` | Identifying which iPod is connected |
+| `build.sh` | Builds `Syncopation CE.app` |
+
+## Licence
+
+GNU General Public License v3.0 — see [LICENSE](LICENSE).
+
+- The app icon uses the `arrows-collapse-vertical` glyph from
+  [Bootstrap Icons](https://icons.getbootstrap.com/) (MIT).
+- The iPod library format and its checksum were documented by the
+  [libgpod](https://github.com/gtkpod/libgpod) project, whose device tables
+  also identify which iPod is connected.
+- iPod is a trademark of Apple Inc. This project isn't affiliated with or
+  endorsed by Apple.
