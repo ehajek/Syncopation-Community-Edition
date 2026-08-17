@@ -242,3 +242,142 @@ enum AudioConverter {
         return 2
     }
 }
+
+// MARK: - Pipelined conversion
+
+/// Converts ahead of the copy loop on one background thread, so the CPU
+/// works while the iPod's USB link drains and vice versa. The lookahead is
+/// bounded — a few finished tracks, a few GB — so tmp usage stays constant
+/// no matter how large the library is. One conversion is always allowed to
+/// run even when a single huge file exceeds the byte budget on its own,
+/// which keeps the pipeline from wedging on outliers.
+final class ConversionPipeline {
+
+    struct Job {
+        let index: Int          // position in the sync plan
+        let source: URL
+        let sampleRate: Int
+        let durationMS: Int
+    }
+
+    struct Outcome {
+        let url: URL?           // converted file, ready to place on the iPod
+        let bytes: Int64
+        let error: Error?
+    }
+
+    /// How far the converter may run ahead of the copier.
+    static let maxLookaheadFiles = 3
+    static let maxLookaheadBytes: Int64 = 5_000_000_000
+
+    /// FAT32's hard per-file ceiling — nothing this size can land on an iPod.
+    static let fat32Limit: Int64 = 4_294_967_295
+
+    private let cond = NSCondition()
+    private var outcomes: [Int: Outcome] = [:]
+    private var inFlightFiles = 0
+    private var inFlightBytes: Int64 = 0
+    private var stopped = false
+    private let jobs: [Job]
+    private let tmpDir: URL
+
+    init(jobs: [Job], tmpDir: URL) {
+        self.jobs = jobs
+        self.tmpDir = tmpDir
+        let worker = Thread { [self] in work() }
+        worker.name = "com.eddiehajek.syncopation.convert-pipeline"
+        worker.qualityOfService = .userInitiated
+        worker.start()
+    }
+
+    /// Blocks until the converted result for a plan index is ready.
+    /// The copy loop consumes indices in plan order, and the worker delivers
+    /// them in plan order, so this never waits on an index the worker has
+    /// silently passed by.
+    func take(_ index: Int) -> Outcome {
+        cond.lock(); defer { cond.unlock() }
+        while outcomes[index] == nil && !stopped { cond.wait() }
+        return outcomes.removeValue(forKey: index)
+            ?? Outcome(url: nil, bytes: 0,
+                       error: AudioConvertError.failed("the conversion was interrupted"))
+    }
+
+    /// The copier has deleted a converted file; its budget is free again.
+    func didConsume(bytes: Int64) {
+        cond.lock()
+        inFlightFiles -= 1
+        inFlightBytes -= bytes
+        cond.broadcast()
+        cond.unlock()
+    }
+
+    /// Ends the worker and removes any converted files nobody consumed.
+    /// Safe to call at every exit from a sync, including normal completion.
+    func stop() {
+        cond.lock()
+        stopped = true
+        let leftovers = outcomes.values.compactMap(\.url)
+        outcomes.removeAll()
+        cond.broadcast()
+        cond.unlock()
+        for url in leftovers { try? FileManager.default.removeItem(at: url) }
+    }
+
+    private func work() {
+        let fm = FileManager.default
+        for job in jobs {
+            cond.lock()
+            while !stopped && inFlightFiles > 0 &&
+                  (inFlightFiles >= Self.maxLookaheadFiles ||
+                   inFlightBytes >= Self.maxLookaheadBytes) {
+                cond.wait()
+            }
+            let bail = stopped
+            cond.unlock()
+            if bail { return }
+
+            // Preflight: even at generous compression, a long enough track
+            // cannot fit under FAT32's 4 GB ceiling. Skip it before spending
+            // an hour of CPU proving the point. (16-bit PCM at the target
+            // rate, stereo; ALAC won't halve that for real music.)
+            let rate = AudioConverter.iPodSampleRate(for: job.sampleRate)
+            let pcmBytes = Int64(job.durationMS) / 1000 * Int64(rate) * 4
+            if pcmBytes / 2 > Self.fat32Limit {
+                let hours = job.durationMS / 3_600_000
+                deliver(job.index, Outcome(url: nil, bytes: 0,
+                    error: AudioConvertError.failed(
+                        "about \(hours) hours of audio in one file — the converted "
+                        + "track would exceed the iPod's 4 GB per-file limit, so it was skipped")))
+                continue
+            }
+
+            let out = tmpDir.appendingPathComponent(UUID().uuidString + ".m4a")
+            do {
+                try AudioConverter.convertToALAC(source: job.source, output: out,
+                                                 sourceRate: job.sampleRate)
+                let size = ((try? fm.attributesOfItem(atPath: out.path))?[.size] as? Int64) ?? 0
+                if size >= Self.fat32Limit {
+                    try? fm.removeItem(at: out)
+                    deliver(job.index, Outcome(url: nil, bytes: 0,
+                        error: AudioConvertError.failed(
+                            "the converted file exceeds the iPod's 4 GB per-file limit — skipped")))
+                    continue
+                }
+                cond.lock()
+                inFlightFiles += 1
+                inFlightBytes += size
+                cond.unlock()
+                deliver(job.index, Outcome(url: out, bytes: size, error: nil))
+            } catch {
+                deliver(job.index, Outcome(url: nil, bytes: 0, error: error))
+            }
+        }
+    }
+
+    private func deliver(_ index: Int, _ outcome: Outcome) {
+        cond.lock()
+        outcomes[index] = outcome
+        cond.broadcast()
+        cond.unlock()
+    }
+}

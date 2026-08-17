@@ -13,6 +13,10 @@ import AppKit
 import IOKit
 import IOKit.usb
 
+// The release codename, macOS-style. Repairs inherit the family name —
+// 1.0.x is still Origen. Shown in the About panel next to the version.
+let versionCodename = "Origen"
+
 let junkNames: Set<String> = [".DS_Store", ".Spotlight-V100", ".Trashes", ".fseventsd"]
 
 let musicExtensions: Set<String> = [
@@ -314,7 +318,24 @@ final class SyncModel: ObservableObject {
     @Published var selectedIPod: IPodDevice?
     @Published var logText = ""
     @Published var status = "Ready."
-    @Published var running = false
+    @Published var running = false {
+        didSet {
+            // Hold off idle sleep while a sync runs. A long first sync left
+            // unattended must not have the Mac doze off mid-copy — sleep cuts
+            // USB power and takes the iPod with it. Display sleep stays
+            // allowed; only the system itself is kept awake.
+            guard running != oldValue else { return }
+            if running {
+                syncActivity = ProcessInfo.processInfo.beginActivity(
+                    options: [.userInitiated, .idleSystemSleepDisabled],
+                    reason: "Syncing music")
+            } else if let activity = syncActivity {
+                ProcessInfo.processInfo.endActivity(activity)
+                syncActivity = nil
+            }
+        }
+    }
+    private var syncActivity: NSObjectProtocol?
     @Published var done: Double = 0
     @Published var total: Double = 0
     @Published var mode: SyncMode { didSet {
@@ -690,7 +711,19 @@ final class SyncModel: ObservableObject {
             }
             todo.append((f, meta, convert))
         }
-        let needed = todo.reduce(Int64(0)) { $0 + $1.0.size }
+        // Copied files cost their own size. Converted files cost what the
+        // *output* will be: 16-bit stereo ALAC at an iPod-legal rate. For
+        // CD-quality FLAC that's near the source size, but hi-res sources
+        // shrink several-fold when downsampled — estimating those at source
+        // size refused syncs that would have fit comfortably. When duration
+        // is unknown, fall back to source size (the safe direction).
+        let needed = todo.reduce(Int64(0)) { sum, item in
+            let (file, meta, convert) = item
+            guard convert, meta.durationMS > 0 else { return sum + file.size }
+            let rate = AudioConverter.iPodSampleRate(for: meta.sampleRate)
+            let pcm = Int64(meta.durationMS) / 1000 * Int64(rate) * 4  // 16-bit stereo
+            return sum + min(pcm * 3 / 4, file.size)   // ALAC ≈ 75% of PCM, capped at source
+        }
         let neededStr = ByteCountFormatter.string(fromByteCount: needed, countStyle: .file)
         var free = Int64.max
         if let attrs = try? fm.attributesOfFileSystem(forPath: ipod.volumePath),
@@ -727,9 +760,33 @@ final class SyncModel: ObservableObject {
         var deviceLost = false
         var nextID = (db.tracks.map(\.id).max() ?? 51) + 1
         let tmpDir = fm.temporaryDirectory.appendingPathComponent("syncopation", isDirectory: true)
+        try? fm.removeItem(at: tmpDir)     // sweep leftovers from any interrupted run
         try? fm.createDirectory(at: tmpDir, withIntermediateDirectories: true)
         let journal = openCopyJournal(volume: ipod.volumePath)
         defer { try? journal?.close() }
+
+        // ---- Pipelined conversion: a background worker converts ahead while
+        // this loop copies to the iPod, so the CPU and the USB link work at
+        // the same time instead of taking turns. Bounded lookahead keeps tmp
+        // usage constant regardless of library size.
+        let convertJobs: [ConversionPipeline.Job] = todo.enumerated().compactMap { i, item in
+            guard item.2 else { return nil }
+            return ConversionPipeline.Job(index: i, source: item.0.url,
+                                          sampleRate: item.1.sampleRate,
+                                          durationMS: item.1.durationMS)
+        }
+        let pipeline: ConversionPipeline? = convertJobs.isEmpty
+            ? nil : ConversionPipeline(jobs: convertJobs, tmpDir: tmpDir)
+        defer { pipeline?.stop() }
+
+        // Adaptive time-remaining for the status line: project from the pace
+        // so far once there is enough of it to mean anything.
+        let syncStart = Date()
+        func timeLeftString(_ seconds: TimeInterval) -> String {
+            let m = Int(seconds / 60)
+            if m >= 60 { return "\(m / 60) hr \(m % 60) min" }
+            return m >= 2 ? "\(m) min" : "a minute or two"
+        }
 
         for (i, item) in todo.enumerated() {
             if cancelled { break }
@@ -742,23 +799,42 @@ final class SyncModel: ObservableObject {
             let songLabel = meta.title.isEmpty
                 ? (file.relativePath as NSString).lastPathComponent
                 : meta.title
+            var etaSuffix = ""
+            if i >= 3 {
+                let pace = Date().timeIntervalSince(syncStart) / Double(i)
+                let remaining = pace * Double(todo.count - i)
+                if remaining > 90 { etaSuffix = " \u{2014} about \(timeLeftString(remaining)) left" }
+            }
             post {
                 self.status = "\(convert ? "Converting" : "Copying") \u{201C}\(songLabel)\u{201D}"
-                    + " \u{2014} \(i + 1) of \(todo.count)"
+                    + " \u{2014} \(i + 1) of \(todo.count)" + etaSuffix
             }
+            // A converted file taken from the pipeline but not yet placed on
+            // the iPod; the catch below releases it if the copy fails.
+            var pipelineTicket: (url: URL, bytes: Int64)?
             do {
                 var payload = file.url
                 var ext = (file.relativePath as NSString).pathExtension.lowercased()
                 if convert {
-                    let out = tmpDir.appendingPathComponent(UUID().uuidString + ".m4a")
-                    try AudioConverter.convertToALAC(source: file.url, output: out,
-                                                     sourceRate: meta.sampleRate)
-                    payload = out
+                    guard let pipeline else {
+                        throw AudioConvertError.failed("the conversion pipeline is not running")
+                    }
+                    let result = pipeline.take(i)
+                    if let error = result.error { throw error }
+                    guard let url = result.url else {
+                        throw AudioConvertError.failed("conversion produced no file")
+                    }
+                    pipelineTicket = (url, result.bytes)
+                    payload = url
                     ext = "m4a"
                 }
                 let dest = try placeOnIPod(fileAt: payload, musicRoot: musicRoot, ext: ext)
                 recordCopy(dest.path, journal: journal)
-                if convert { try? fm.removeItem(at: payload) }
+                if let ticket = pipelineTicket {
+                    try? fm.removeItem(at: ticket.url)
+                    pipeline?.didConsume(bytes: ticket.bytes)
+                    pipelineTicket = nil
+                }
                 let size = ((try? fm.attributesOfItem(atPath: dest.path))?[.size] as? Int64)
                     ?? file.size
 
@@ -798,6 +874,12 @@ final class SyncModel: ObservableObject {
                 if convert { converted += 1 }
                 log("\(convert ? "CONVERTED" : "COPIED   ")  \(file.relativePath)")
             } catch {
+                // Release a converted file the copy step never placed, so the
+                // pipeline's budget isn't leaked by the failure.
+                if let ticket = pipelineTicket {
+                    try? fm.removeItem(at: ticket.url)
+                    pipeline?.didConsume(bytes: ticket.bytes)
+                }
                 errors += 1
                 log("ERROR      \(file.relativePath): \(error.localizedDescription)")
                 if !iPodStillConnected(ipod) { deviceLost = true; break }
@@ -1601,6 +1683,13 @@ struct SyncopationApp: App {
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: windowWidth, height: windowHeight)
         .commands {
+            CommandGroup(replacing: .appInfo) {
+                Button("About Syncopation CE") {
+                    NSApplication.shared.orderFrontStandardAboutPanel(options: [
+                        .applicationVersion: "\(appVersion) \u{201C}\(versionCodename)\u{201D}",
+                    ])
+                }
+            }
             CommandGroup(replacing: .help) {
                 Text("Syncopation CE \(appVersion)")
                 Divider()
