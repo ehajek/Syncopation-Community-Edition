@@ -21,7 +21,7 @@ for again.
 
 ### Added
 
-- **Synco-pod** *(Pro)* — a three-way control, Music / Podcasts / Audiobooks,
+- **Synco-pod** *(both)* — a three-way control, Music / Podcasts / Audiobooks,
   replaces a pair of tick boxes: three states that exclude one another are a
   picker, not switches kept apart by hand. Filing follows from it — media
   type plus the resume-position, skip-when-shuffling, and unplayed flags the
@@ -53,7 +53,7 @@ for again.
 
 | | **Pro** | **CE** |
 |---|:---:|:---:|
-| Synco-pod — podcasts and audiobooks filed as such | ✓ | — |
+| Synco-pod — podcasts and audiobooks filed as such | ✓ | ✓ |
 | Appearance — system, light, or dark | ✓ | ✓ |
 | Liquid Glass and window transparency switchable off | ✓ | n/a — already flat |
 | A sound when a sync finishes | ✓ | ✓ |

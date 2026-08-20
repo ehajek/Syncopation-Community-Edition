@@ -23,6 +23,9 @@ compiled by the Swift compiler that ships with Apple's command line tools.
 - **Safe when things go wrong** — if an iPod is unplugged mid-transfer, the
   sync stops cleanly, and files it had already copied are tidied up on the
   next run rather than left stranded on the device.
+- **Podcasts and audiobooks — Synco-pod** — filed as what they are: they
+  resume where you stopped, stay out of shuffle, and are marked unplayed.
+  DRM-free files only; Apple Books and Audible purchases are copy-protected.
 - **Appearance** — follows the system, or pin it Light or Dark. Flat in all
   three.
 - **A sound when a sync finishes** — in your own alert tone.
@@ -67,7 +70,7 @@ at 1.1. What each version repaired and added, release by release:
 | Conversion runs ahead of the copy — a faster first sync | ✓ | ✓ |
 | The Mac stays awake while a sync runs | ✓ | ✓ |
 | Space check prices hi-res tracks at their converted size | ✓ | ✓ |
-| Synco-pod — podcasts and audiobooks filed as such: resume position, kept out of shuffle, unplayed flag | ✓ | — |
+| Synco-pod — podcasts and audiobooks filed as such: resume position, kept out of shuffle, unplayed flag | ✓ | ✓ |
 | A sound when a sync finishes, in your own alert tone | ✓ | ✓ |
 | Match Default Source removes items — episodes and books included, not just songs | ✓ | — |
 
