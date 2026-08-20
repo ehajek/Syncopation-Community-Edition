@@ -76,6 +76,45 @@ struct BinReader {
 
 // MARK: - Model
 
+// How a track is filed on the device. The raw value is the mhit mediatype
+// field: 1 = music, 4 = podcast, 8 = audiobook. Podcast is parse-only here —
+// the Podcasts menu needs episode metadata this writer cannot produce yet, so
+// podcast-typed tracks from other software refile as music on write.
+enum IPodMediaKind: UInt32, CaseIterable, Identifiable {
+    case music = 1
+    case podcast = 4
+    case audiobook = 8
+
+    var id: UInt32 { rawValue }
+
+    /// What the Synco-pod control calls each kind.
+    var label: String {
+        switch self {
+        case .music: return "Music"
+        case .podcast: return "Podcasts"
+        case .audiobook: return "Audiobooks"
+        }
+    }
+
+    /// Shown under the control. Both selectable kinds say something, written
+    /// to the same length: the card must not change height when the selection
+    /// changes, or the buttons below it jump.
+    var details: String {
+        switch self {
+        case .music:
+            return "Filed as music — albums, artists and shuffle all behave exactly as they "
+                 + "always have. This is the default, and the right choice for anything "
+                 + "that isn't spoken word. Nothing about the iPod's menus changes."
+        case .podcast:
+            return "Podcast filing is being developed."
+        case .audiobook:
+            return "Filed under the iPod's Audiobooks menu — resumes where you left off and "
+                 + "stays out of shuffle. .m4b files are treated this way automatically. "
+                 + "DRM-free files only: Audible and Apple Books cannot be synced."
+        }
+    }
+}
+
 struct IPodTrack {
     var id: UInt32 = 0                  // renumbered on write (starts at 52, like iTunes)
     var dbid: UInt64 = 0
@@ -100,6 +139,7 @@ struct IPodTrack {
     var samplerate: UInt32 = 0
     var rating: UInt8 = 0
     var playcount: UInt32 = 0
+    var mediaKind: IPodMediaKind = .music   // Music / Audiobooks filing
     var timeAdded: UInt32 = 0           // mac time
     var timeModified: UInt32 = 0
     // Artwork links (see IPodArtwork.swift). mhiiLink points at an mhii id in
@@ -112,12 +152,17 @@ struct IPodTrack {
 
 struct IPodPlaylist {
     var isMaster = false
+    // The flagged podcast playlist (iTunes-created). Recognized so it can be
+    // dropped cleanly on write — see the refile note on IPodMediaKind.
+    var isPodcast = false
     var name = ""
     var id: UInt64 = 0
     var sortorder: UInt32 = 1           // 1 = manual
     var memberIDs: [UInt32] = []        // track ids
     var smartPrefMhod: Data? = nil      // raw mhod type 50 (smart playlist prefs), verbatim
     var smartRulesMhod: Data? = nil     // raw mhod type 51 (smart playlist rules), verbatim
+    var viewPrefsMhod: Data? = nil      // raw mhod type 102 (view prefs), verbatim — the
+                                        // firmware dereferences it when opening a playlist
 }
 
 struct IPodDatabase {
@@ -239,6 +284,13 @@ enum ITunesDBParser {
             t.artworkSize = r.u32(at: pos + 128)
             t.hasArtwork = r.u8(at: pos + 164)
             if headerLen > 0x160 + 4 { t.mhiiLink = r.u32(at: pos + 0x160) }
+            if headerLen > 0xD0 + 4 {
+                // Bitmask, not an enum: Apple writes 5 (music|podcast) for an
+                // audio podcast — match by bit, not by exact value.
+                let rawKind = r.u32(at: pos + 0xD0)
+                t.mediaKind = rawKind & 4 != 0 ? .podcast
+                            : rawKind & 8 != 0 ? .audiobook : .music
+            }
 
             var mhodPos = pos + headerLen
             for _ in 0..<mhodCount {
@@ -281,6 +333,7 @@ enum ITunesDBParser {
             var pl = IPodPlaylist()
             pl.isMaster = r.u8(at: pos + 20) == 1
             pl.id = r.u64(at: pos + 28)
+            pl.isPodcast = r.u8(at: pos + 42) == 1
             pl.sortorder = r.u32(at: pos + 44)
 
             var childPos = pos + headerLen
@@ -295,6 +348,8 @@ enum ITunesDBParser {
                     pl.smartPrefMhod = r.slice(childPos, mhodTotal)
                 case 51:
                     pl.smartRulesMhod = r.slice(childPos, mhodTotal)
+                case 102:
+                    pl.viewPrefsMhod = r.slice(childPos, mhodTotal)
                 default:
                     break   // prefs mhod (100) and sort indexes (52/53) are regenerated
                 }
@@ -303,7 +358,13 @@ enum ITunesDBParser {
             for _ in 0..<mhipCount {
                 guard r.peekTag(at: childPos) == "mhip" else { break }
                 let mhipTotal = Int(r.u32(at: childPos + 8))   // includes its child mhod
-                pl.memberIDs.append(r.u32(at: childPos + 24))
+                // Podcast playlists carry show-header entries (flag 0x100, no
+                // track) between episodes — headers are structure, not members.
+                let groupflag = r.u32(at: childPos + 16)
+                let trackID = r.u32(at: childPos + 24)
+                if groupflag & 0x100 == 0, trackID != 0 {
+                    pl.memberIDs.append(trackID)
+                }
                 childPos += max(mhipTotal, 76)
             }
             playlists.append(pl)
@@ -363,6 +424,14 @@ enum ITunesDBWriter {
             let mpl = db.playlists.remove(at: mi)
             db.playlists.insert(mpl, at: 0)
         }
+        // Podcast-typed tracks (from other software) refile as music and
+        // flagged playlists are dropped — the Podcasts menu needs episode
+        // metadata this writer cannot produce, and a flagged playlist whose
+        // records lack it makes the menu refuse to open on real hardware.
+        for i in db.tracks.indices where db.tracks[i].mediaKind == .podcast {
+            db.tracks[i].mediaKind = .music
+        }
+        db.playlists.removeAll(where: \.isPodcast)
         if db.dbID == 0 { db.dbID = UInt64.random(in: 1...UInt64.max) }
         if db.libraryPID == 0 { db.libraryPID = UInt64.random(in: 1...UInt64.max) }
 
@@ -537,8 +606,8 @@ enum ITunesDBWriter {
         w.u32(0)                        // skip count
         w.u32(0)                        // +0xA0 last skipped
         w.u8(t.hasArtwork)              // 1 = has artwork
-        w.u8(0)                         // skip when shuffling
-        w.u8(0)                         // remember position
+        w.u8(t.mediaKind == .music ? 0 : 1)   // skip when shuffling
+        w.u8(t.mediaKind == .music ? 0 : 1)   // remember position
         w.u8(0)                         // flag4
         w.u64(t.dbid)                   // dbid2
         w.u8(0)                         // +0xB0 lyrics
@@ -551,7 +620,7 @@ enum ITunesDBWriter {
         w.u32(0)
         w.u32(0)                        // postgap
         w.u32(0)
-        w.u32(1)                        // +0xD0 mediatype: 1 = audio
+        w.u32(t.mediaKind.rawValue)     // +0xD0 mediatype: 1 music, 8 audiobook
         w.u32(0)                        // season
         w.u32(0)                        // episode
         w.u32(0)
@@ -644,6 +713,7 @@ enum ITunesDBWriter {
         if isFullMaster { mhodNum += 10 }             // 5 × [sort index + jump table]
         if pl.smartPrefMhod != nil { mhodNum += 1 }
         if pl.smartRulesMhod != nil { mhodNum += 1 }
+        if pl.viewPrefsMhod != nil { mhodNum += 1 }
         w.tag("mhyp")
         w.u32(108)
         w.u32(0)                        // total — patched
@@ -661,6 +731,8 @@ enum ITunesDBWriter {
 
         writeStringMhod(w, type: 1, pl.name)
         writePlaylistPrefsMhod(w)
+        // Apple's order: name, prefs (100), view prefs (102), then the rest.
+        if let view = pl.viewPrefsMhod { w.bytes(view) }
         if let pref = pl.smartPrefMhod { w.bytes(pref) }
         if let rules = pl.smartRulesMhod { w.bytes(rules) }
 

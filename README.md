@@ -23,9 +23,13 @@ compiled by the Swift compiler that ships with Apple's command line tools.
 - **Safe when things go wrong** — if an iPod is unplugged mid-transfer, the
   sync stops cleanly, and files it had already copied are tidied up on the
   next run rather than left stranded on the device.
-- **Podcasts and audiobooks — Synco-pod** — filed as what they are: they
-  resume where you stopped, stay out of shuffle, and are marked unplayed.
-  DRM-free files only; Apple Books and Audible purchases are copy-protected.
+- **Audiobooks — Synco-pod** — filed as what they are: they resume where
+  you stopped and stay out of shuffle. On 2007-and-later iPods (classic,
+  nano 3rd generation on) they land in the device's own Audiobooks menu;
+  earlier models file everything under Music — the same result Apple's
+  current tools produce for those devices. DRM-free files only; Apple
+  Books and Audible purchases are copy-protected. Podcast filing is in
+  the works.
 - **Appearance** — follows the system, or pin it Light or Dark. Flat in all
   three.
 - **A sound when a sync finishes** — in your own alert tone.

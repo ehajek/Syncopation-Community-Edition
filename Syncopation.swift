@@ -15,7 +15,10 @@ import IOKit.usb
 
 // The release codename, macOS-style. Repairs inherit the family name —
 // 1.0.x is still Origen. Shown in the About panel next to the version.
-let versionCodename = "Origen"
+// Codenames track the version number, not the feature set — 1.0 and 1.0.1
+// were Origen in both editions, so 1.1 is Podification in both even though
+// the podcast filing itself is Pro-only.
+let versionCodename = "Podification"
 
 let junkNames: Set<String> = [".DS_Store", ".Spotlight-V100", ".Trashes", ".fseventsd"]
 
@@ -317,6 +320,10 @@ final class SyncModel: ObservableObject {
     @Published var ipods: [IPodDevice] = []
     @Published var selectedIPod: IPodDevice?
     @Published var logText = ""
+    // Synco-pod: how iPod-mode syncs file their tracks. Deliberately not
+    // persisted — filing is a per-run decision, and Music each launch is the
+    // safe default.
+    @Published var syncMediaKind: IPodMediaKind = .music
     @Published var status = "Ready."
     @Published var running = false {
         didSet {
@@ -329,13 +336,31 @@ final class SyncModel: ObservableObject {
                 syncActivity = ProcessInfo.processInfo.beginActivity(
                     options: [.userInitiated, .idleSystemSleepDisabled],
                     reason: "Syncing music")
-            } else if let activity = syncActivity {
-                ProcessInfo.processInfo.endActivity(activity)
-                syncActivity = nil
+            } else {
+                if let activity = syncActivity {
+                    ProcessInfo.processInfo.endActivity(activity)
+                    syncActivity = nil
+                }
+                announceFinish()
             }
+            if running { runStarted = Date() }
         }
     }
     private var syncActivity: NSObjectProtocol?
+    private var runStarted: Date?
+
+    /// A long sync is something you walk away from, so say when it's over —
+    /// in the user's own alert sound, at their volume, and silently if they
+    /// have turned interface sounds off. A run that finished while you were
+    /// still watching it doesn't need announcing, and a run that failed needs
+    /// announcing just as much as one that worked.
+    private func announceFinish() {
+        defer { runStarted = nil }
+        guard UserDefaults.standard.object(forKey: finishSoundKey) as? Bool ?? true,
+              let started = runStarted,
+              Date().timeIntervalSince(started) >= finishSoundFloor else { return }
+        NSSound.beep()
+    }
     @Published var done: Double = 0
     @Published var total: Double = 0
     @Published var mode: SyncMode { didSet {
@@ -645,13 +670,14 @@ final class SyncModel: ObservableObject {
                 + "Sync it once with iTunes or Music, then try again."); return
         }
         defaults.set(src, forKey: "source")
+        let kind = syncMediaKind        // read on the main thread, used on the worker
         beginRun(dryRun ? "Checking…" : "Scanning…")
         DispatchQueue.global(qos: .userInitiated).async { [self] in
-            runIPod(src: src, ipod: ipod, dryRun: dryRun)
+            runIPod(src: src, ipod: ipod, dryRun: dryRun, kind: kind)
         }
     }
 
-    private func runIPod(src: String, ipod: IPodDevice, dryRun: Bool) {
+    private func runIPod(src: String, ipod: IPodDevice, dryRun: Bool, kind runMediaKind: IPodMediaKind) {
         let fm = FileManager.default
         log("Found iPod: “\(ipod.name)” — \(ipod.family)")
         log("Library: \(ipod.needsHashedDB ? "checksummed" : "standard")")
@@ -828,6 +854,14 @@ final class SyncModel: ObservableObject {
                     payload = url
                     ext = "m4a"
                 }
+                // Filing: the per-sync tick, except .m4b which is an audiobook
+                // on its own. Audiobooks ride the mp4 container onto the device
+                // as .m4b — the extension the firmware's audiobook accounting
+                // and bookmarking key on; mp3 stays mp3 (never bookmarkable,
+                // under iTunes either).
+                let srcExt = (file.relativePath as NSString).pathExtension.lowercased()
+                let kind: IPodMediaKind = srcExt == "m4b" ? .audiobook : runMediaKind
+                if kind == .audiobook, ext == "m4a" { ext = "m4b" }
                 let dest = try placeOnIPod(fileAt: payload, musicRoot: musicRoot, ext: ext)
                 recordCopy(dest.path, journal: journal)
                 if let ticket = pipelineTicket {
@@ -847,6 +881,7 @@ final class SyncModel: ObservableObject {
                 t.albumArtist = meta.albumArtist
                 t.genre = meta.genre
                 t.composer = meta.composer
+                t.mediaKind = kind
                 let ft = ipodFiletype(ext: ext, converted: convert)
                 t.filetypeMarker = ft.marker
                 t.filetypeDescription = ft.description
@@ -1036,8 +1071,24 @@ let cardCorner: CGFloat = 8
 // The size the window always opens at — stretchable afterwards, but never
 // restored from a previous session, so every launch starts composed.
 let windowWidth: CGFloat = 760
-let windowHeight: CGFloat = 550
-let debugPanelHeight: CGFloat = 220
+// Matches Pro's composed size — the two editions present at the same
+// dimensions; CE's shorter content collects its slack above the foot.
+let windowHeight: CGFloat = 810
+
+// On short screens the composed layout doesn't fit: 13-inch Macs at default
+// scaling offer roughly 775 usable points against an 810-point window.
+// Rather than maintaining a second compact layout, the whole interface
+// renders scaled down just enough to fit the screen it opened on; 14-inch
+// and larger displays see it at 100%.
+let uiScale: CGFloat = {
+    guard let screen = NSScreen.main else { return 1 }
+    let titleBar: CGFloat = 28
+    return min(1, (screen.visibleFrame.height - titleBar) / windowHeight)
+}()
+// The drawer rolls out of the window's right edge — the full window height
+// is its vertical budget, which a bottom roll-out under an already
+// screen-filling window never had.
+let debugPanelWidth: CGFloat = 480
 
 // Debug panel visibility. Stored so the Help menu item and the Debug button
 // can drive the same state from two different parts of the view tree; reset
@@ -1050,6 +1101,22 @@ let accentBottom = Color(red: 0x30 / 255.0, green: 0x0A / 255.0, blue: 0x24 / 25
 // The foot is a shorter bar than the title, so it starts partway down the same
 // gradient rather than repeating it — the two read as one frame, not two bars.
 let footerTop = Color(red: 0x5D / 255.0, green: 0x1F / 255.0, blue: 0x41 / 255.0)
+let syncoOrchid = Color(red: 0xC7 / 255.0, green: 0x5B / 255.0, blue: 0x8F / 255.0)
+/// One hairline for the whole window. Orchid rather than the deeper
+/// aubergine: at hairline weight the dark tone disappears against the panels.
+let syncoLine = syncoOrchid.opacity(0.55)
+let syncoLineSoft = syncoOrchid.opacity(0.34)
+/// The title bar's exact fill, reused by the active segment of a track.
+let accentGradient = LinearGradient(colors: [accentTop, accentBottom],
+                                    startPoint: .top, endPoint: .bottom)
+
+// View menu settings. Appearance follows the system unless told otherwise;
+// the finish sound borrows whatever alert the user picked in System Settings.
+let appearanceKey = "appearance"          // "system" | "light" | "dark"
+let finishSoundKey = "playSoundWhenFinished"
+
+/// A run shorter than this was watched, and doesn't need announcing.
+let finishSoundFloor: TimeInterval = 30
 
 struct HeaderBar: View {
     private var titleGradient: LinearGradient {
@@ -1075,7 +1142,7 @@ struct HeaderBar: View {
         }
         .padding(.leading, 80)      // clears the traffic lights
         .padding(.trailing, 16)
-        .frame(height: 30)
+        .frame(height: 36)
         .frame(maxWidth: .infinity)
         .background(LinearGradient(colors: [accentTop, accentBottom],
                                    startPoint: .top, endPoint: .bottom))
@@ -1104,7 +1171,7 @@ struct FooterBar: View {
         .font(.system(size: 10.5))
         .foregroundColor(.white.opacity(0.86))
         .padding(.horizontal, 16)
-        .padding(.vertical, 6)
+        .padding(.vertical, 9)
         .background(LinearGradient(colors: [footerTop, accentBottom],
                                    startPoint: .top, endPoint: .bottom))
     }
@@ -1125,7 +1192,7 @@ struct CardChrome: ViewModifier {
             .background(RoundedRectangle(cornerRadius: cardCorner)
                 .fill(fill ?? Color.primary.opacity(0.05)))
             .overlay(RoundedRectangle(cornerRadius: cardCorner)
-                .stroke(accentTop.opacity(0.25), lineWidth: 1))
+                .stroke(syncoLineSoft, lineWidth: 1))
     }
 }
 
@@ -1166,6 +1233,16 @@ final class DebugDrawer {
     }
 
     private func open(on parent: NSWindow, content: NSView) {
+        // Classic drawer manners: no room on the right of the window means
+        // the window gives way, nudged left until the drawer fits on screen.
+        if let screen = parent.screen {
+            let overflow = (parent.frame.maxX + debugPanelWidth) - screen.visibleFrame.maxX
+            if overflow > 0 {
+                var f = parent.frame
+                f.origin.x = max(screen.visibleFrame.minX, f.origin.x - overflow)
+                parent.setFrame(f, display: true, animate: true)
+            }
+        }
         let w = NSWindow(contentRect: hiddenFrame(parent),
                          styleMask: .borderless, backing: .buffered, defer: false)
         w.isOpaque = false
@@ -1225,13 +1302,17 @@ final class DebugDrawer {
     }
 
     private func hiddenFrame(_ parent: NSWindow) -> NSRect {
-        NSRect(x: parent.frame.minX, y: parent.frame.minY,
-               width: parent.frame.width, height: debugPanelHeight + tuck)
+        NSRect(x: parent.frame.maxX - debugPanelWidth - tuck,
+               y: parent.frame.minY,
+               width: debugPanelWidth + tuck,
+               height: parent.frame.height)
     }
 
     private func shownFrame(_ parent: NSWindow) -> NSRect {
-        NSRect(x: parent.frame.minX, y: parent.frame.minY - debugPanelHeight,
-               width: parent.frame.width, height: debugPanelHeight + tuck)
+        NSRect(x: parent.frame.maxX - tuck,
+               y: parent.frame.minY,
+               width: debugPanelWidth + tuck,
+               height: parent.frame.height)
     }
 
 }
@@ -1277,25 +1358,81 @@ struct ActionButton: View {
 // track says "pick one of these", which is what the control actually is.
 struct ModeSelector: View {
     @Binding var mode: SyncMode
+    /// Ties the highlight to one identity across positions, which is what
+    /// lets it travel instead of blinking out and in somewhere else.
+    @Namespace private var slide
+    // .disabled() reaches controls but not plain tap gestures, so the guard
+    // has to be explicit — a sync must not be able to switch modes.
+    @Environment(\.isEnabled) private var enabled
 
     var body: some View {
         HStack(spacing: 2) {
             ForEach(SyncMode.allCases) { m in
-                Button { mode = m } label: {
-                    Text(m.label)
-                        .font(.system(size: 12.5,
-                                      weight: mode == m ? .semibold : .regular))
-                        .foregroundColor(mode == m ? .white : .primary)
-                        .padding(.horizontal, 16)
-                        .frame(height: 26)
-                        .background(RoundedRectangle(cornerRadius: 6)
-                            .fill(mode == m ? accentTop : .clear))
-                }
-                .buttonStyle(.plain)
+                let on = mode == m
+                Text(m.label)
+                    .font(.system(size: 13))
+                    .foregroundColor(on ? .white : .primary)
+                    // Equal shares of the window rather than sized to the
+                    // label, so the track lines up with everything else.
+                    .frame(maxWidth: .infinity)
+                    .frame(height: actionHeight - 4)
+                    .background {
+                        if on {
+                            RoundedRectangle(cornerRadius: cardCorner - 2)
+                                .fill(accentGradient)
+                                .matchedGeometryEffect(id: "selection", in: slide)
+                        }
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        guard enabled else { return }
+                        withAnimation(.smooth(duration: 0.26)) { mode = m }
+                    }
             }
         }
         .padding(2)
         .syncoCard()
+        .frame(maxWidth: .infinity)
+    }
+}
+
+// Synco-pod wears the same track as Synco-mode, in green: it is the one
+// control that changes what a file *becomes* on the device, and it should not
+// be mistaken for Synco-mode at a glance. Two kinds — podcast filing is being
+// developed (it needs episode metadata the writer cannot produce yet).
+let syncoGreen = Color(red: 0x2F / 255.0, green: 0x8F / 255.0, blue: 0x60 / 255.0)
+
+struct MediaKindSelector: View {
+    @Binding var kind: IPodMediaKind
+    @Namespace private var slide
+    @Environment(\.isEnabled) private var enabled
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach([IPodMediaKind.music, .audiobook]) { k in
+                let on = kind == k
+                Text(k.label)
+                    .font(.system(size: 13))
+                    .foregroundColor(on ? .white : .primary)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: actionHeight - 4)
+                    .background {
+                        if on {
+                            RoundedRectangle(cornerRadius: cardCorner - 2)
+                                .fill(syncoGreen)
+                                .matchedGeometryEffect(id: "selection", in: slide)
+                        }
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        guard enabled else { return }
+                        withAnimation(.smooth(duration: 0.26)) { kind = k }
+                    }
+            }
+        }
+        .padding(2)
+        .syncoCard()
+        .frame(maxWidth: .infinity)
     }
 }
 
@@ -1307,13 +1444,47 @@ struct CapacityBar: View {
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .leading) {
-                Capsule().fill(Color.primary.opacity(0.14))
+                Capsule().fill(Color.black.opacity(0.32))
+                // Same orchid run as the sync progress bar, so the two meters
+                // read as the same kind of thing. Amber still takes over near
+                // the top: that one is a warning, and a warning is allowed to
+                // break the palette.
                 Capsule()
-                    .fill(fraction >= 0.92 ? Color.orange : accentTop)
+                    .fill(fraction >= 0.92
+                          ? AnyShapeStyle(Color.orange)
+                          : AnyShapeStyle(LinearGradient(colors: [accentBottom, syncoOrchid],
+                                                         startPoint: .leading,
+                                                         endPoint: .trailing)))
                     .frame(width: max(4, geo.size.width * fraction))
             }
         }
         .frame(height: 8)
+        .clipShape(Capsule())
+        .overlay(Capsule().stroke(syncoLineSoft, lineWidth: 0.8))
+    }
+}
+
+// Drawn by hand rather than a system ProgressView: .tint() does not reach the
+// stock bar, which kept painting itself in the system accent colour — an
+// orange sliver in an aubergine window.
+struct SyncProgressBar: View {
+    var value: Double
+    var total: Double
+
+    var body: some View {
+        GeometryReader { geo in
+            let fraction = total > 0 ? min(max(value / total, 0), 1) : 0
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.black.opacity(0.32))
+                Capsule()
+                    .fill(LinearGradient(colors: [accentBottom, syncoOrchid],
+                                         startPoint: .leading, endPoint: .trailing))
+                    .frame(width: geo.size.width * fraction)
+            }
+        }
+        .frame(height: 6)
+        .clipShape(Capsule())
+        .overlay(Capsule().stroke(syncoLineSoft, lineWidth: 0.8))
     }
 }
 
@@ -1355,7 +1526,7 @@ struct DebugDrawerView: View {
             if model.mode == .ipod, let pod = model.selectedIPod {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(),
                                                              alignment: .leading),
-                                         count: 3),
+                                         count: 2),
                           alignment: .leading, spacing: 3) {
                     ForEach(deviceFacts(pod), id: \.0) { fact in
                         HStack(spacing: 5) {
@@ -1375,13 +1546,11 @@ struct DebugDrawerView: View {
         .padding(10)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .syncoCard()
-        .padding(.horizontal, 20)
-        .padding(.bottom, 14)
-        // The drawer's top 13pt is tucked behind the main window; the extra
-        // top padding puts the card clear of the window's bottom edge. The
-        // frosted backdrop is the drawer window's own masked effect view, so
-        // this view stays transparent.
-        .padding(.top, 25)
+        .padding(.vertical, 14)
+        .padding(.trailing, 14)
+        // The drawer's left 13pt is tucked behind the main window; the extra
+        // leading padding puts the card clear of the window's right edge.
+        .padding(.leading, 25)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
@@ -1410,7 +1579,7 @@ struct ContentView: View {
     // Shared with the Help menu, which drives the same drawer.
     @AppStorage(debugPanelKey) private var showDebug = false
 
-    var body: some View {
+    private var composed: some View {
         VStack(spacing: 0) {
             HeaderBar()
             mainContent
@@ -1419,8 +1588,25 @@ struct ContentView: View {
             Spacer(minLength: 0)
             FooterBar(right: footerStatus)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .frame(minWidth: 700, minHeight: windowHeight)
+    }
+
+    var body: some View {
+        Group {
+            if uiScale < 1 {
+                // Short screen: lay out at the composed size, render scaled to
+                // fit. The window is fixed-size in this state — stretching a
+                // transformed layout helps nobody.
+                composed
+                    .frame(width: windowWidth, height: windowHeight, alignment: .top)
+                    .scaleEffect(uiScale, anchor: .topLeading)
+                    .frame(width: windowWidth * uiScale,
+                           height: windowHeight * uiScale, alignment: .topLeading)
+            } else {
+                composed
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .frame(minWidth: 700, minHeight: windowHeight)
+            }
+        }
         .onReceive(NotificationCenter.default
             .publisher(for: .toggleDebugDrawer)) { _ in toggleDebug() }
     }
@@ -1475,6 +1661,31 @@ struct ContentView: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 if model.mode == .ipod { ipodDestination } else { folderDestination }
+            }
+
+            if model.mode == .ipod {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Synco-pod:").bold()
+                    MediaKindSelector(kind: $model.syncMediaKind)
+                        .disabled(model.running)
+                        .padding(.bottom, 2)
+
+                    HStack(alignment: .top, spacing: 9) {
+                        Image(systemName: "info.circle")
+                            .foregroundColor(.secondary)
+                            .padding(.top, 2)
+                        Text(model.syncMediaKind.details)
+                            .font(.callout)
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            // Both kinds' texts run ~2 lines; the floor keeps
+                            // the card one height so the buttons never jump.
+                            .frame(minHeight: 36, alignment: .top)
+                    }
+                    .padding(9)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .syncoCard()
+                }
             }
 
             VStack(alignment: .leading, spacing: 11) {
@@ -1555,7 +1766,7 @@ struct ContentView: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            ProgressView(value: model.done, total: max(model.total, 1))
+            SyncProgressBar(value: model.done, total: model.total)
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1652,9 +1863,31 @@ struct SyncopationApp: App {
     // Same key ContentView reads, so the Help menu and the Debug button drive
     // one piece of state rather than two.
     @AppStorage(debugPanelKey) private var showDebug = false
+    @AppStorage(appearanceKey) private var appearance = "system"
+    @AppStorage(finishSoundKey) private var playSoundWhenFinished = true
 
     private var appVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+    }
+
+    /// nil hands the choice back to macOS, which is the default.
+    private var chosenScheme: ColorScheme? {
+        switch appearance {
+        case "light": return .light
+        case "dark": return .dark
+        default: return nil
+        }
+    }
+
+    /// .preferredColorScheme re-colours SwiftUI views but leaves the AppKit
+    /// layer on the system appearance, which reads as a half-switched app.
+    /// Setting NSApp.appearance moves the whole thing at once.
+    private func applyAppearance() {
+        switch appearance {
+        case "light": NSApp.appearance = NSAppearance(named: .aqua)
+        case "dark":  NSApp.appearance = NSAppearance(named: .darkAqua)
+        default:      NSApp.appearance = nil
+        }
     }
 
     var body: some Scene {
@@ -1673,16 +1906,32 @@ struct SyncopationApp: App {
                             // Always open at the composed size. macOS otherwise
                             // restores whatever the window was left at, which
                             // defeats having a considered default at all.
-                            window.setContentSize(NSSize(width: windowWidth,
-                                                         height: windowHeight))
+                            window.setContentSize(NSSize(width: windowWidth * uiScale,
+                                                         height: windowHeight * uiScale))
                             window.center()
                         }
                     }
                 }
+                .preferredColorScheme(chosenScheme)
+                .onAppear { applyAppearance() }
+                .onChange(of: appearance) { _ in applyAppearance() }
         }
         .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: windowWidth, height: windowHeight)
+        .defaultSize(width: windowWidth * uiScale, height: windowHeight * uiScale)
         .commands {
+            // Appearance and the finish sound are View concerns: nobody has
+            // ever gone looking for a theme in the Edit menu. Liquid Glass and
+            // Transparency are deliberately absent — CE is flat by design, so
+            // there is nothing for either switch to turn off.
+            CommandGroup(after: .toolbar) {
+                Picker("Appearance", selection: $appearance) {
+                    Text("System").tag("system")
+                    Text("Light").tag("light")
+                    Text("Dark").tag("dark")
+                }
+                Toggle("Play Sound When Finished", isOn: $playSoundWhenFinished)
+                Divider()
+            }
             CommandGroup(replacing: .appInfo) {
                 Button("About Syncopation CE") {
                     NSApplication.shared.orderFrontStandardAboutPanel(options: [

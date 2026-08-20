@@ -21,13 +21,13 @@ for again.
 
 ### Added
 
-- **Synco-pod** *(both)* — a three-way control, Music / Podcasts / Audiobooks,
-  replaces a pair of tick boxes: three states that exclude one another are a
-  picker, not switches kept apart by hand. Filing follows from it — media
-  type plus the resume-position, skip-when-shuffling, and unplayed flags the
-  iPod has honored since 2005. `.m4b` is an audiobook whichever way the
-  control is set. DRM-free files only: Apple Books and Audible purchases are
-  copy-protected and cannot make the trip.
+- **Synco-pod** *(both)* — Music / Audiobooks, one control. Audiobooks land
+  on the device as `.m4b` — the form its accounting and bookmarking key on —
+  so they file under the Audiobooks menu, resume where you stopped, and stay
+  out of shuffle. `.m4b` sources are audiobooks whichever way the control is
+  set. Podcast filing is being developed: the Podcasts menu wants episode
+  metadata the writer cannot produce yet. DRM-free files only: Apple Books
+  and Audible purchases are copy-protected and cannot make the trip.
 - **Appearance** *(both)* — follow the system, or pin the window light
   or dark. The dark theme is built on the synco.uno palette.
 - **Liquid Glass and window transparency, each switchable off** *(Pro)* —
@@ -53,7 +53,7 @@ for again.
 
 | | **Pro** | **CE** |
 |---|:---:|:---:|
-| Synco-pod — podcasts and audiobooks filed as such | ✓ | ✓ |
+| Synco-pod — audiobooks filed as such (podcasts in development) | ✓ | ✓ |
 | Appearance — system, light, or dark | ✓ | ✓ |
 | Liquid Glass and window transparency switchable off | ✓ | n/a — already flat |
 | A sound when a sync finishes | ✓ | ✓ |
