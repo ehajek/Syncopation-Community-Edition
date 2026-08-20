@@ -23,6 +23,9 @@ compiled by the Swift compiler that ships with Apple's command line tools.
 - **Safe when things go wrong** — if an iPod is unplugged mid-transfer, the
   sync stops cleanly, and files it had already copied are tidied up on the
   next run rather than left stranded on the device.
+- **Appearance** — follows the system, or pin it Light or Dark. Flat in all
+  three.
+- **A sound when a sync finishes** — in your own alert tone.
 - Skips macOS junk files, checks free space before starting, and remembers
   your folders between launches.
 
@@ -58,15 +61,13 @@ at 1.1. What each version repaired and added, release by release:
 | Match Default Source — device mirrors the folder, deletions included | ✓ | — |
 | Preview, Erase, Eject, free-space check | ✓ | ✓ |
 | Debug drawer — device facts and the per-file log | ✓ | ✓ |
-| Interface | Liquid Glass on macOS 26, native controls on 13–15 | Flat, native |
+| Accessibility | Liquid Glass (macOS 26 and up); transparency, System, Light, Dark mode on every supported macOS, Ventura included — each switchable | System, Light, Dark mode — flat |
 | Distribution | Mac App Store — sandboxed, notarized, reviewed | GitHub — clone it, build it |
 | Price | $19.99 once; $24.99 from January 1, 2027 | Free, GPL v3 |
 | Conversion runs ahead of the copy — a faster first sync | ✓ | ✓ |
 | The Mac stays awake while a sync runs | ✓ | ✓ |
 | Space check prices hi-res tracks at their converted size | ✓ | ✓ |
 | Synco-pod — podcasts and audiobooks filed as such: resume position, kept out of shuffle, unplayed flag | ✓ | — |
-| Appearance — follow the system, or pin light or dark | ✓ | ✓ |
-| Liquid Glass and window transparency switchable off | ✓ | n/a — already flat |
 | A sound when a sync finishes, in your own alert tone | ✓ | ✓ |
 | Match Default Source removes items — episodes and books included, not just songs | ✓ | — |
 
